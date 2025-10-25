@@ -1,13 +1,13 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:io';
+
+import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
+
 import '../services/api_service.dart';
 import '../widgets/rider_bottom_nav.dart';
 import '../widgets/longdo_map.dart';
-
-
 
 class RiderDashboardScreen extends StatefulWidget {
   const RiderDashboardScreen({Key? key}) : super(key: key);
@@ -21,7 +21,6 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
   List<Map<String, dynamic>> availableJobs = [];
   Map<String, dynamic>? currentJob;
   bool isLoading = true;
-  Timer? _realTimeTimer;
   Timer? _locationTimer;
   File? _capturedPhoto; // Store captured photo for current state
   double? _currentLatitude;
@@ -36,17 +35,42 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
 
   @override
   void dispose() {
-    _realTimeTimer?.cancel();
     _locationTimer?.cancel();
+    _locationTimer = null;
     super.dispose();
   }
 
+  // ---------- Helpers ----------
+  double? _asDouble(dynamic v) {
+    if (v == null) return null;
+    if (v is num) return v.toDouble();
+    if (v is String && v.trim().isNotEmpty) return double.tryParse(v.trim());
+    return null;
+  }
+
+  bool _isPhotoRequired(String status) {
+    // ปรับตามนโยบายธุรกิจของคุณได้
+    return status == 'ON_ROUTE' || status == 'DELIVERED';
+  }
+
+  String _nextStatusFrom(String current) {
+    switch (current) {
+      case 'ASSIGNED':
+        return 'ON_ROUTE';
+      case 'ON_ROUTE':
+        return 'DELIVERED';
+      default:
+        return current;
+    }
+  }
+
+  // ---------- Location ----------
   Future<void> _getCurrentLocation() async {
     try {
-      // Check if location services are enabled
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        print('Location services are disabled. Using default Bangkok location.');
+        debugPrint('Location services are disabled. Using default Bangkok location.');
+        if (!mounted) return;
         setState(() {
           _currentLatitude = 13.7563;
           _currentLongitude = 100.5018;
@@ -54,12 +78,12 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
         return;
       }
 
-      // Check location permissions
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          print('Location permissions are denied. Using default Bangkok location.');
+          debugPrint('Location permissions are denied. Using default Bangkok location.');
+          if (!mounted) return;
           setState(() {
             _currentLatitude = 13.7563;
             _currentLongitude = 100.5018;
@@ -69,7 +93,8 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
       }
 
       if (permission == LocationPermission.deniedForever) {
-        print('Location permissions are permanently denied. Using default Bangkok location.');
+        debugPrint('Location permissions are permanently denied. Using default Bangkok location.');
+        if (!mounted) return;
         setState(() {
           _currentLatitude = 13.7563;
           _currentLongitude = 100.5018;
@@ -77,51 +102,84 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
         return;
       }
 
-      // Get current position
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
 
-      // Check if location is in Thailand (approximate bounds)
-      // Thailand: lat 5.6-20.5, lon 97.3-105.6
-      if (position.latitude >= 5.6 && position.latitude <= 20.5 &&
-          position.longitude >= 97.3 && position.longitude <= 105.6) {
+      if (position.latitude >= 5.6 &&
+          position.latitude <= 20.5 &&
+          position.longitude >= 97.3 &&
+          position.longitude <= 105.6) {
+        if (!mounted) return;
         setState(() {
           _currentLatitude = position.latitude;
           _currentLongitude = position.longitude;
         });
-        print('📍 Current GPS location: ${position.latitude}, ${position.longitude}');
+        debugPrint('📍 Current GPS location: ${position.latitude}, ${position.longitude}');
       } else {
-        // Location outside Thailand, use Bangkok as default
-        print('📍 Location outside Thailand, using Bangkok: ${position.latitude}, ${position.longitude}');
+        debugPrint('📍 Location outside Thailand, using Bangkok: ${position.latitude}, ${position.longitude}');
+        if (!mounted) return;
         setState(() {
           _currentLatitude = 13.7563;
           _currentLongitude = 100.5018;
         });
       }
     } catch (e) {
-      print('Error getting location: $e. Using default Bangkok location.');
-      if (mounted) {
-        setState(() {
-          _currentLatitude = 13.7563;
-          _currentLongitude = 100.5018;
-        });
-      }
+      debugPrint('Error getting location: $e. Using default Bangkok location.');
+      if (!mounted) return;
+      setState(() {
+        _currentLatitude = 13.7563;
+        _currentLongitude = 100.5018;
+      });
     }
   }
 
+  Future<void> _updateLocationSilently() async {
+    try {
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+
+      if (position.latitude >= 5.6 &&
+          position.latitude <= 20.5 &&
+          position.longitude >= 97.3 &&
+          position.longitude <= 105.6) {
+        if (!mounted) return;
+        setState(() {
+          _currentLatitude = position.latitude;
+          _currentLongitude = position.longitude;
+        });
+
+        if (currentJob != null && currentUser != null) {
+          final riderId = currentUser!['user_id'] ?? currentUser!['id'];
+          final deliveryId = currentJob!['delivery_id'];
+          await ApiService.saveRiderLocation(
+            riderId,
+            position.latitude,
+            position.longitude,
+            deliveryId: deliveryId,
+          );
+        }
+      }
+    } catch (_) {
+      // Silently fail
+    }
+  }
+
+  // ---------- Data load ----------
   Future<void> _loadUserData() async {
     final user = await ApiService.getCurrentUser();
     if (user != null) {
+      if (!mounted) return;
       setState(() {
         currentUser = user;
       });
-      // Clean up stale assignments first
+
       final riderId = user['user_id'] ?? user['id'];
       await ApiService.cleanupRiderAssignments(riderId);
-      
+
       await _loadAvailableJobs();
-      await _loadCurrentJob();
+      await _loadCurrentJob(preserveIfNull: false);
       _startRealTimeUpdates();
     }
   }
@@ -129,103 +187,125 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
   Future<void> _loadAvailableJobs() async {
     if (currentUser == null) return;
 
-    setState(() {
-      isLoading = true;
-    });
+    if (mounted) {
+      setState(() {
+        isLoading = true;
+      });
+    }
 
     try {
-      // Get available jobs (WAITING status only)
-      final jobs = await ApiService.getAvailableJobs();
+      final jobsRaw = await ApiService.getAvailableJobs();
+      final jobs = (jobsRaw as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+
+      if (!mounted) return;
       setState(() {
         availableJobs = jobs;
         isLoading = false;
       });
     } catch (e) {
-      print('Error loading available jobs: $e');
+      debugPrint('Error loading available jobs: $e');
+      if (!mounted) return;
       setState(() {
         isLoading = false;
       });
     }
   }
 
-  Future<void> _loadCurrentJob() async {
+  Future<void> _loadCurrentJob({bool preserveIfNull = false}) async {
     if (currentUser == null) {
-      print('⚠️ Cannot load current job - no user');
+      debugPrint('⚠️ Cannot load current job - no user');
       return;
     }
 
     try {
       final riderId = currentUser!['user_id'] ?? currentUser!['id'];
-      print('📥 Loading current job for rider: $riderId');
-      
+      debugPrint('📥 Loading current job for rider: $riderId');
+
+      final prevJob = currentJob; // keep old job for status-change detection
       final job = await ApiService.getRiderCurrentJob(riderId);
-      
-      print('📦 Current job loaded: ${job != null ? "Job ID ${job['delivery_id']}" : "No job"}');
-      
+
+      debugPrint('📦 Current job loaded: ${job != null ? "Job ID ${job['delivery_id']}" : "No job"}');
+
+      if (!mounted) return;
       setState(() {
+        if (job == null && preserveIfNull) {
+          // Preserve optimistic state
+          return;
+        }
+
         currentJob = job;
-        // Clear captured photo when loading new job or status changed
-        if (job == null || (currentJob != null && currentJob!['status'] != job['status'])) {
-          _capturedPhoto = null;
+
+        final prevStatus = prevJob?['status'];
+        final newStatus = job?['status'];
+        if (job == null || (prevStatus != null && prevStatus != newStatus)) {
+          _capturedPhoto = null; // clear photo on status change or no job
         }
       });
     } catch (e) {
-      print('❌ Error loading current job: $e');
+      debugPrint('❌ Error loading current job: $e');
+    }
+  }
+
+  Future<void> _loadCurrentJobWithRetry({
+    int attempts = 5,
+    Duration initialDelay = const Duration(milliseconds: 300),
+    bool preserveIfNull = true,
+  }) async {
+    if (currentUser == null) return;
+    final riderId = currentUser!['user_id'] ?? currentUser!['id'];
+
+    Duration delay = initialDelay;
+
+    for (int i = 0; i < attempts; i++) {
+      try {
+        final job = await ApiService.getRiderCurrentJob(riderId);
+
+        if (job != null) {
+          if (!mounted) return;
+          setState(() {
+            final prevStatus = currentJob?['status'];
+            final newStatus = job['status'];
+            currentJob = Map<String, dynamic>.from(job);
+            if (prevStatus != null && prevStatus != newStatus) {
+              _capturedPhoto = null;
+            }
+          });
+          return; // done
+        } else {
+          if (!preserveIfNull && mounted) {
+            setState(() {
+              currentJob = null;
+            });
+          }
+        }
+      } catch (e) {
+        debugPrint('❌ Retry load current job error: $e');
+      }
+
+      await Future.delayed(delay);
+      delay *= 2; // exponential backoff
     }
   }
 
   void _startRealTimeUpdates() {
-    _realTimeTimer?.cancel();
     _locationTimer?.cancel();
-    
-    // Disabled auto-refresh to prevent map reloading
-    // Users can use pull-to-refresh to manually update
-    
-    // Optional: Update GPS location every 10 seconds when rider has active job
-    // This only updates location without rebuilding the entire map
+    _locationTimer = null;
+
+    // ปิด auto-refresh list/map เพื่อเลี่ยง map reload
+    // อัปเดตเฉพาะตำแหน่งทุก 10 วินาทีเมื่อมีงาน
     _locationTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
       if (currentJob != null && mounted) {
         _updateLocationSilently();
       }
     });
   }
-  
-  Future<void> _updateLocationSilently() async {
-    try {
-      Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
-      
-      if (position.latitude >= 5.6 && position.latitude <= 20.5 &&
-          position.longitude >= 97.3 && position.longitude <= 105.6) {
-        if (mounted) {
-          setState(() {
-            _currentLatitude = position.latitude;
-            _currentLongitude = position.longitude;
-          });
-          
-          // Save location to database if rider has active job
-          if (currentJob != null && currentUser != null) {
-            final riderId = currentUser!['user_id'] ?? currentUser!['id'];
-            final deliveryId = currentJob!['delivery_id'];
-            await ApiService.saveRiderLocation(
-              riderId,
-              position.latitude,
-              position.longitude,
-              deliveryId: deliveryId,
-            );
-          }
-        }
-      }
-    } catch (e) {
-      // Silently fail, keep using last known location
-    }
-  }
 
+  // ---------- Actions ----------
   Future<void> _acceptJob(Map<String, dynamic> job) async {
     if (currentUser == null) return;
 
-    // Check if rider already has a job
     if (currentJob != null) {
       _showMessage('คุณมีงานที่ยังไม่เสร็จอยู่แล้ว');
       return;
@@ -234,57 +314,56 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
     try {
       final riderId = currentUser!['user_id'] ?? currentUser!['id'];
       final deliveryId = job['delivery_id'];
-      
-      print('🔄 Accepting job $deliveryId for rider $riderId');
-      
+
+      debugPrint('🔄 Accepting job $deliveryId for rider $riderId');
+
       final success = await ApiService.acceptDeliveryJob(deliveryId, riderId);
-      
+
       if (success) {
-        print('✅ Job accepted successfully');
+        debugPrint('✅ Job accepted successfully');
         _showMessage('รับงานสำเร็จ!');
-        
-        // Set currentJob immediately with the job data we have
-        if (mounted) {
-          setState(() {
-            currentJob = {
-              'delivery_id': job['delivery_id'],
-              'status': 'ASSIGNED',
-              'sender_name': job['sender_name'],
-              'receiver_name': job['receiver_name'],
-              'pickup_address': job['pickup_address'],
-              'delivery_address': job['delivery_address'],
-              'pickup_lat': job['pickup_lat'],
-              'pickup_lng': job['pickup_lng'],
-              'delivery_lat': job['delivery_lat'],
-              'delivery_lng': job['delivery_lng'],
-              'note': job['note'],
-            };
-            availableJobs = [];
-            isLoading = false;
-          });
-          print('🔄 UI updated with job ${job['delivery_id']}');
-        }
-        
-        // Then reload from server in background to get complete data
-        Future.delayed(const Duration(milliseconds: 500), () {
-          _loadCurrentJob();
+
+        // Optimistic update — show current job immediately
+        if (!mounted) return;
+        setState(() {
+          currentJob = {
+            'delivery_id': job['delivery_id'],
+            'status': 'ASSIGNED',
+            'sender_name': job['sender_name'],
+            'receiver_name': job['receiver_name'],
+            'pickup_address': job['pickup_address'],
+            'delivery_address': job['delivery_address'],
+            'pickup_lat': job['pickup_lat'],
+            'pickup_lng': job['pickup_lng'],
+            'delivery_lat': job['delivery_lat'],
+            'delivery_lng': job['delivery_lng'],
+            'note': job['note'],
+          };
+          availableJobs = [];
+          isLoading = false;
         });
+
+        // Then sync from server with retry, but preserve optimistic state if null
+        await _loadCurrentJobWithRetry(
+          attempts: 5,
+          initialDelay: const Duration(milliseconds: 300),
+          preserveIfNull: true,
+        );
       } else {
-        print('❌ Failed to accept job');
+        debugPrint('❌ Failed to accept job');
         _showMessage('ไม่สามารถรับงานได้ อาจมีคนอื่นรับไปแล้ว');
         await _loadAvailableJobs();
       }
     } catch (e) {
       _showMessage('เกิดข้อผิดพลาด: $e');
-      print('❌ Error accepting job: $e');
+      debugPrint('❌ Error accepting job: $e');
     }
   }
 
   Future<void> _updateJobStatus(String newStatus) async {
     if (currentJob == null) return;
 
-    // Check if photo is required and captured
-    if (_capturedPhoto == null) {
+    if (_isPhotoRequired(newStatus) && _capturedPhoto == null) {
       _showMessage('กรุณาถ่ายรูปก่อนอัพเดทสถานะ');
       return;
     }
@@ -292,24 +371,33 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
     try {
       final deliveryId = currentJob!['delivery_id'];
       final success = await ApiService.updateDeliveryStatus(
-        deliveryId, 
+        deliveryId,
         newStatus,
         photoFile: _capturedPhoto,
       );
-      
+
       if (success) {
+        if (!mounted) return;
         setState(() {
           currentJob!['status'] = newStatus;
           _capturedPhoto = null; // Clear photo after successful update
         });
         _showMessage('อัพเดทสถานะสำเร็จ!');
-        
+
         if (newStatus == 'DELIVERED') {
-          // Job completed, clear current job
+          // Job completed, clear current job and reload list
+          if (!mounted) return;
           setState(() {
             currentJob = null;
           });
           await _loadAvailableJobs();
+        } else {
+          // sync เผื่อมีข้อมูลอื่นอัปเดตจากเซิร์ฟเวอร์
+          await _loadCurrentJobWithRetry(
+            attempts: 3,
+            initialDelay: const Duration(milliseconds: 300),
+            preserveIfNull: true,
+          );
         }
       } else {
         _showMessage('ไม่สามารถอัพเดทสถานะได้');
@@ -326,8 +414,9 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
         source: ImageSource.camera,
         imageQuality: 80,
       );
-      
+
       if (photo != null) {
+        if (!mounted) return;
         setState(() {
           _capturedPhoto = File(photo.path);
         });
@@ -338,13 +427,14 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
     }
   }
 
+  // ---------- UI ----------
   List<MapMarker> _getMapMarkers() {
-    List<MapMarker> markers = [];
-    
-    // Always show rider's current location
+    final List<MapMarker> markers = [];
+
+    // Rider location
     if (_currentLatitude != null && _currentLongitude != null) {
       String markerTitle = 'Your Location';
-      
+
       if (currentJob != null) {
         final status = currentJob!['status'] ?? 'ASSIGNED';
         if (status == 'ASSIGNED') {
@@ -353,7 +443,7 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
           markerTitle = 'Rider - Delivering Package';
         }
       }
-      
+
       markers.add(MapMarker(
         latitude: _currentLatitude!,
         longitude: _currentLongitude!,
@@ -361,44 +451,43 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
         type: MarkerType.rider,
       ));
     }
-    
-    // Add pickup and dropoff markers if there's an active job
+
+    // Job locations
     if (currentJob != null) {
       final status = currentJob!['status'] ?? 'ASSIGNED';
-      
+
       if (status == 'ASSIGNED') {
-        // Show pickup location from database
-        final pickupLat = currentJob!['pickup_lat'];
-        final pickupLng = currentJob!['pickup_lng'];
-        
+        final pickupLat = _asDouble(currentJob!['pickup_lat']);
+        final pickupLng = _asDouble(currentJob!['pickup_lng']);
+
         if (pickupLat != null && pickupLng != null) {
           markers.add(MapMarker(
-            latitude: pickupLat is String ? double.parse(pickupLat) : pickupLat.toDouble(),
-            longitude: pickupLng is String ? double.parse(pickupLng) : pickupLng.toDouble(),
+            latitude: pickupLat,
+            longitude: pickupLng,
             title: 'Pickup Location',
             type: MarkerType.pickup,
           ));
         }
       } else if (status == 'ON_ROUTE') {
-        // Show dropoff location from database
-        final deliveryLat = currentJob!['delivery_lat'];
-        final deliveryLng = currentJob!['delivery_lng'];
-        
+        final deliveryLat = _asDouble(currentJob!['delivery_lat']);
+        final deliveryLng = _asDouble(currentJob!['delivery_lng']);
+
         if (deliveryLat != null && deliveryLng != null) {
           markers.add(MapMarker(
-            latitude: deliveryLat is String ? double.parse(deliveryLat) : deliveryLat.toDouble(),
-            longitude: deliveryLng is String ? double.parse(deliveryLng) : deliveryLng.toDouble(),
+            latitude: deliveryLat,
+            longitude: deliveryLng,
             title: 'Delivery Location',
             type: MarkerType.destination,
           ));
         }
       }
     }
-    
+
     return markers;
   }
 
   void _showMessage(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message)),
     );
@@ -466,12 +555,13 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: Colors.orange,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Text(
+                child: const Text(
                   'งานใหม่',
                   style: TextStyle(
                     color: Colors.white,
@@ -490,9 +580,9 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
               ),
             ],
           ),
-          
+
           const SizedBox(height: 12),
-          
+
           // Pickup Info
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -501,7 +591,7 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                 width: 8,
                 height: 8,
                 margin: const EdgeInsets.only(top: 6),
-                decoration: BoxDecoration(
+                decoration: const BoxDecoration(
                   color: Colors.green,
                   shape: BoxShape.circle,
                 ),
@@ -538,9 +628,9 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
               ),
             ],
           ),
-          
+
           const SizedBox(height: 8),
-          
+
           // Delivery Info
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -549,7 +639,7 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                 width: 8,
                 height: 8,
                 margin: const EdgeInsets.only(top: 6),
-                decoration: BoxDecoration(
+                decoration: const BoxDecoration(
                   color: Colors.red,
                   shape: BoxShape.circle,
                 ),
@@ -586,8 +676,8 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
               ),
             ],
           ),
-          
-          if (note.isNotEmpty) ...[
+
+          if (note.toString().trim().isNotEmpty) ...[
             const SizedBox(height: 8),
             Text(
               'หมายเหตุ: $note',
@@ -598,9 +688,9 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
               ),
             ),
           ],
-          
+
           const SizedBox(height: 16),
-          
+
           // Accept Button
           SizedBox(
             width: double.infinity,
@@ -629,29 +719,31 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
   }
 
   Widget _buildCurrentJobCard() {
-    if (currentJob == null) return Container();
+    if (currentJob == null) return const SizedBox.shrink();
 
     final deliveryId = currentJob!['delivery_id']?.toString() ?? '0';
-    final status = currentJob!['status'] ?? 'ASSIGNED';
+    final status = (currentJob!['status'] ?? 'ASSIGNED').toString();
     final senderName = currentJob!['sender_name'] ?? 'Unknown';
     final receiverName = currentJob!['receiver_name'] ?? 'Unknown';
     final pickupAddress = currentJob!['pickup_address'] ?? 'Address not available';
     final deliveryAddress = currentJob!['delivery_address'] ?? 'Address not available';
+
+    final nextStatus = _nextStatusFrom(status);
 
     return Container(
       margin: const EdgeInsets.all(16),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: _getStatusColor(status), width: 2),
+        borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.grey.withOpacity(0.1),
+            color: _getStatusColor(status).withOpacity(0.1),
+            blurRadius: 6,
             spreadRadius: 1,
-            blurRadius: 4,
             offset: const Offset(0, 2),
-          ),
+          )
         ],
       ),
       child: Column(
@@ -661,485 +753,92 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _getStatusColor(status),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
+              Chip(
+                backgroundColor: _getStatusColor(status),
+                label: Text(
                   _getStatusDisplay(status),
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: const TextStyle(color: Colors.white),
                 ),
               ),
               Text(
                 'ID: $deliveryId',
                 style: TextStyle(
                   fontSize: 14,
-                  color: Colors.grey[600],
-                  fontWeight: FontWeight.w500,
+                  color: Colors.grey[700],
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
           ),
-          
-          const SizedBox(height: 16),
-          
+
+          const SizedBox(height: 12),
+
           // Addresses
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 8,
-                height: 8,
-                margin: const EdgeInsets.only(top: 6),
-                decoration: BoxDecoration(
-                  color: Colors.green,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 12),
+              const Icon(Icons.store_mall_directory, size: 18),
+              const SizedBox(width: 8),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'รับสินค้า',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.grey[700],
-                      ),
-                    ),
-                    Text(
-                      pickupAddress,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        color: Colors.black,
-                      ),
-                    ),
-                    Text(
-                      'จาก: $senderName',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey[600],
-                      ),
-                    ),
-                  ],
+                child: Text(
+                  'รับ: $pickupAddress\nจาก: $senderName',
+                  style: const TextStyle(fontSize: 14),
                 ),
               ),
             ],
           ),
-          
-          const SizedBox(height: 12),
-          
+          const SizedBox(height: 8),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 8,
-                height: 8,
-                margin: const EdgeInsets.only(top: 6),
-                decoration: BoxDecoration(
-                  color: Colors.red,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 12),
+              const Icon(Icons.location_on, size: 18),
+              const SizedBox(width: 8),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'ส่งสินค้า',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.grey[700],
-                      ),
-                    ),
-                    Text(
-                      deliveryAddress,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        color: Colors.black,
-                      ),
-                    ),
-                    Text(
-                      'ถึง: $receiverName',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey[600],
-                      ),
-                    ),
-                  ],
+                child: Text(
+                  'ส่ง: $deliveryAddress\nถึง: $receiverName',
+                  style: const TextStyle(fontSize: 14),
                 ),
               ),
             ],
           ),
-          
-          const SizedBox(height: 16),
-          
-          // Action Buttons
-          if (status == 'ASSIGNED')
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: () => _updateJobStatus('ON_ROUTE'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                child: const Text(
-                  'เริ่มเดินทางรับสินค้า',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+
+          const SizedBox(height: 12),
+
+          // Photo preview
+          if (_capturedPhoto != null) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.file(
+                _capturedPhoto!,
+                height: 160,
+                width: double.infinity,
+                fit: BoxFit.cover,
               ),
             ),
-          
-          if (status == 'ON_ROUTE')
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: () => _updateJobStatus('DELIVERED'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                child: const Text(
-                  'ส่งสินค้าเสร็จแล้ว',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
+            const SizedBox(height: 12),
+          ],
 
-  Widget _buildNoActiveJobCard() {
-    return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: Colors.orange[50],
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.orange[200]!),
-      ),
-      child: Column(
-        children: [
-          // Illustration placeholder
-          Container(
-            width: 120,
-            height: 120,
-            decoration: BoxDecoration(
-              color: Colors.orange[100],
-              borderRadius: BorderRadius.circular(60),
-            ),
-            child: Icon(
-              Icons.delivery_dining,
-              size: 60,
-              color: Colors.orange[600],
-            ),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No Active Job',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Colors.black,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'You don\'t have any active jobs at the moment. Check the available jobs below or wait for new assignments.',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey[600],
-              height: 1.4,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActiveJobCard(ScrollController scrollController) {
-    if (currentJob == null) return Container();
-
-    final status = currentJob!['status'] ?? 'ASSIGNED';
-    final senderName = currentJob!['sender_name'] ?? 'Unknown';
-    final receiverName = currentJob!['receiver_name'] ?? 'Unknown';
-    final pickupAddress = currentJob!['pickup_address'] ?? 'Address not available';
-    final deliveryAddress = currentJob!['delivery_address'] ?? 'Address not available';
-    final note = currentJob!['note'] ?? 'Small Box';
-    final deliveryId = currentJob!['delivery_id']?.toString() ?? '0';
-
-    // Calculate progress based on status
-    double progress = 0.25;
-    String statusText = 'Accept';
-    if (status == 'ASSIGNED') {
-      progress = 0.5;
-      statusText = 'Picked';
-    } else if (status == 'ON_ROUTE') {
-      progress = 0.75;
-      statusText = 'Delivering';
-    } else if (status == 'DELIVERED') {
-      progress = 1.0;
-      statusText = 'Completed';
-    }
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(24),
-          topRight: Radius.circular(24),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.2),
-            spreadRadius: 2,
-            blurRadius: 10,
-            offset: const Offset(0, -2),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // Drag handle
-          Container(
-            margin: const EdgeInsets.only(top: 12, bottom: 8),
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: Colors.grey[300],
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          Expanded(
-            child: SingleChildScrollView(
-              controller: scrollController,
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-              // Header with ID and Status
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Delivery #$deliveryId',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black,
-                    ),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: _getStatusColor(status),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      _getStatusDisplay(status),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // Job Details
-              Text(
-                'From: $senderName',
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.black,
-            ),
-          ),
-          Text(
-            'To: $receiverName',
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.black,
-            ),
-          ),
-          
-          const SizedBox(height: 8),
-          
-          Text(
-            '$pickupAddress to $deliveryAddress',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.blue[600],
-            ),
-          ),
-          
-          const SizedBox(height: 4),
-          
-          Text(
-            'Parcel: $note',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey[600],
-            ),
-          ),
-          
-          const SizedBox(height: 16),
-          
-          // Status
-          Text(
-            statusText,
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.black,
-            ),
-          ),
-          
-          const SizedBox(height: 8),
-          
-          // Progress Bar
-          Column(
-            children: [
-              LinearProgressIndicator(
-                value: progress,
-                backgroundColor: Colors.grey[300],
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
-                minHeight: 6,
-              ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Accept',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: progress >= 0.25 ? Colors.blue : Colors.grey[600],
-                      fontWeight: progress >= 0.25 ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                  ),
-                  Text(
-                    'Picked',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: progress >= 0.5 ? Colors.blue : Colors.grey[600],
-                      fontWeight: progress >= 0.5 ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                  ),
-                  Text(
-                    'Delivering',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: progress >= 0.75 ? Colors.blue : Colors.grey[600],
-                      fontWeight: progress >= 0.75 ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                  ),
-                  Text(
-                    'Completed',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: progress >= 1.0 ? Colors.blue : Colors.grey[600],
-                      fontWeight: progress >= 1.0 ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          
-          const SizedBox(height: 16),
-          
-          // Action Buttons
+          // Actions
           Row(
             children: [
               Expanded(
-                child: ElevatedButton(
-                  onPressed: () {
-                    // Update status step by step: ASSIGNED -> ON_ROUTE -> DELIVERED
-                    String nextStatus;
-                    if (status == 'ASSIGNED') {
-                      nextStatus = 'ON_ROUTE';
-                    } else if (status == 'ON_ROUTE') {
-                      nextStatus = 'DELIVERED';
-                    } else {
-                      return; // Already delivered
-                    }
-                    _updateJobStatus(nextStatus);
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: status == 'ASSIGNED' ? Colors.blue : Colors.green,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  child: Text(
-                    status == 'ASSIGNED' ? 'เริ่มเดินทาง' : 'ส่งสินค้าเสร็จ',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                child: OutlinedButton.icon(
+                  onPressed: _takePhoto,
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('ถ่ายรูป'),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => _takePhoto(),
-                  style: OutlinedButton.styleFrom(
-                    side: BorderSide(
-                      color: _capturedPhoto != null ? Colors.green : Colors.grey[400]!,
-                      width: _capturedPhoto != null ? 2 : 1,
-                    ),
-                    backgroundColor: _capturedPhoto != null ? Colors.green[50] : null,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  icon: Icon(
-                    _capturedPhoto != null ? Icons.check_circle : Icons.camera_alt,
-                    color: _capturedPhoto != null ? Colors.green : Colors.grey[700],
-                    size: 18,
-                  ),
+                child: ElevatedButton.icon(
+                  onPressed: status == 'DELIVERED'
+                      ? null
+                      : () => _updateJobStatus(nextStatus),
+                  icon: const Icon(Icons.sync),
                   label: Text(
-                    _capturedPhoto != null ? 'ถ่ายแล้ว' : 'ถ่ายรูป',
-                    style: TextStyle(
-                      color: _capturedPhoto != null ? Colors.green : Colors.grey[700],
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    status == 'DELIVERED'
+                        ? 'เสร็จสิ้นแล้ว'
+                        : 'อัปเดตเป็น ${_getStatusDisplay(nextStatus)}',
                   ),
                 ),
               ),
@@ -1147,196 +846,79 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
           ),
         ],
       ),
-            ),
-          ),
-        ],
+    );
+  }
+
+  Widget _buildMapCard() {
+    final centerLat = _currentLatitude ?? 13.7563;
+    final centerLng = _currentLongitude ?? 100.5018;
+
+    return Container(
+      height: 260,
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: LongdoMap(
+        markers: _getMapMarkers(),
+        centerLat: centerLat,
+        centerLng: centerLng,
+        zoom: 14,
       ),
     );
   }
-
-  Widget _buildPackageIllustration() {
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        // Shadow
-        Positioned(
-          bottom: 10,
-          child: Container(
-            width: 80,
-            height: 12,
-            decoration: BoxDecoration(
-              color: Colors.brown[300]?.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(6),
-            ),
-          ),
-        ),
-        // Box
-        Container(
-          width: 70,
-          height: 50,
-          decoration: BoxDecoration(
-            color: Colors.brown[400],
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Stack(
-            children: [
-              // Box lines
-              Positioned(
-                top: 10,
-                left: 10,
-                right: 10,
-                child: Container(
-                  height: 1,
-                  color: Colors.brown[600],
-                ),
-              ),
-              Positioned(
-                top: 10,
-                bottom: 10,
-                left: 35,
-                child: Container(
-                  width: 1,
-                  color: Colors.brown[600],
-                ),
-              ),
-              // Arrows
-              Positioned(
-                bottom: 8,
-                left: 15,
-                child: Icon(
-                  Icons.keyboard_arrow_up,
-                  color: Colors.brown[800],
-                  size: 16,
-                ),
-              ),
-              Positioned(
-                bottom: 8,
-                right: 15,
-                child: Icon(
-                  Icons.keyboard_arrow_up,
-                  color: Colors.brown[800],
-                  size: 16,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
-        // Prevent going back if rider has active job
-        if (currentJob != null) {
-          _showMessage('Please complete your current job first');
-          return false;
-        }
-        return true;
-      },
-      child: Scaffold(
-      backgroundColor: Colors.grey[50],
+    return Scaffold(
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        automaticallyImplyLeading: false,
-        title: const Text(
-          'Rider Dashboard',
-          style: TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-            color: Colors.black,
-          ),
-        ),
-        centerTitle: true,
+        title: const Text('Rider Dashboard'),
       ),
-      body: currentJob != null
-          ? Stack(
-              children: [
-                // Full screen map as background
-                LongdoMapWidget(
-                  height: double.infinity,
-                  latitude: _currentLatitude ?? 13.7563,
-                  longitude: _currentLongitude ?? 100.5018,
-                  zoom: 14,
-                  markers: _getMapMarkers(),
-                ),
-                // LIVE indicator at top right
-                Positioned(
-                  top: 16,
-                  right: 16,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.green,
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.2),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        const Text(
-                          'LIVE TRACKING',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
+      bottomNavigationBar: const RiderBottomNav(currentIndex: 0),
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await _getCurrentLocation();
+          await _loadAvailableJobs();
+          await _loadCurrentJob(preserveIfNull: true);
+        },
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildMapCard(),
+              if (currentJob != null) _buildCurrentJobCard(),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'งานที่ว่าง',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey[800],
                   ),
                 ),
-                // Job info card at bottom - draggable
-                DraggableScrollableSheet(
-                  initialChildSize: 0.35,
-                  minChildSize: 0.2,
-                  maxChildSize: 0.8,
-                  builder: (context, scrollController) {
-                    return _buildActiveJobCard(scrollController);
-                  },
-                ),
-              ],
-            )
-          : RefreshIndicator(
-              onRefresh: () async {
-                await _loadAvailableJobs();
-                await _loadCurrentJob();
-              },
-              child: SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildNoActiveJobCard(),
-                    const SizedBox(height: 100),
-                  ],
-                ),
               ),
-            ),
-      bottomNavigationBar: RiderBottomNav(
-        currentIndex: 0,
-        hasActiveJob: currentJob != null,
-      ),
+              if (isLoading)
+                const Padding(
+                  padding: EdgeInsets.all(24.0),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (availableJobs.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24.0),
+                  child: Center(child: Text('ยังไม่มีงานว่าง')),
+                )
+              else
+                ...availableJobs.map(_buildAvailableJobItem).toList(),
+              const SizedBox(height: 24),
+            ],
+          ),
+        ),
       ),
     );
   }
