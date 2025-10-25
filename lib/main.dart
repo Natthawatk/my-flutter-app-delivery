@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'screen/welcome_screen.dart';
 import 'screen/login_screen.dart';
 import 'screen/register_user.dart';
@@ -14,13 +13,7 @@ import 'screen/track_package.dart';
 import 'screen/addresses.dart';
 import 'screen/select_location_map.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  try {
-    await dotenv.load(fileName: ".env");
-  } catch (e) {
-    print('Warning: Could not load .env file: $e');
-  }
+void main() {
   runApp(const MyApp());
 }
 

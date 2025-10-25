@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
@@ -37,7 +36,7 @@ class _SelectLocationMapScreenState extends State<SelectLocationMapScreen> {
   }
 
   void _initializeWebView() {
-    final apiKey = dotenv.env['MAP_API_KEY']?.replaceAll("'", "") ?? '647cdc5c6e2b848425fbae73021b3fa8';
+    const apiKey = '647cdc5c6e2b848425fbae73021b3fa8';
     
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
