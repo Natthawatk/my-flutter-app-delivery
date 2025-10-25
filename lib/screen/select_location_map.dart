@@ -87,7 +87,7 @@ class _SelectLocationMapScreenState extends State<SelectLocationMapScreen> {
     });
 
     try {
-      final apiKey = dotenv.env['MAP_API_KEY']?.replaceAll("'", "") ?? '647cdc5c6e2b848425fbae73021b3fa8';
+      const apiKey = '647cdc5c6e2b848425fbae73021b3fa8';
       final url = 'https://search.longdo.com/mapsearch/json/search?keyword=$query&limit=5&key=$apiKey';
       
       final response = await http.get(Uri.parse(url));
